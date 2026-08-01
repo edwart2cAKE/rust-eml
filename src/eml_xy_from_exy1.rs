@@ -56,7 +56,7 @@ fn main() {
         })
         .collect();
 
-    let mut progress = std::fs::File::create("progress_eml_xy.log").unwrap();
+    let mut progress = cbfunc::open_progress_log("progress_eml_xy.log").unwrap();
     writeln!(
         progress,
         "DEPTH={} | TARGET={} | {} total iterations | {} threads",

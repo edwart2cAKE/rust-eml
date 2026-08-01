@@ -144,3 +144,9 @@ pub fn equals_num(
     }
     true
 }
+
+pub fn open_progress_log(name: &str) -> std::io::Result<std::fs::File> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("logs");
+    std::fs::create_dir_all(&dir)?;
+    std::fs::File::create(dir.join(name))
+}

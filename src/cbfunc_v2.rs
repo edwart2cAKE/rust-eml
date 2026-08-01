@@ -28,7 +28,7 @@ fn main() {
 
     let total = 3_u64.pow(DEPTH);
 
-    let mut progress = std::fs::File::create("progress_v2.log").unwrap();
+    let mut progress = cbfunc::open_progress_log("progress_v2.log").unwrap();
     writeln!(progress, "DEPTH={} | {} total iterations | searching for x + y", DEPTH, total).unwrap();
     progress.flush().unwrap();
 

@@ -31,7 +31,7 @@ fn main() {
         total += 1u64 << l;
     }
 
-    let mut progress = std::fs::File::create("progress_v3.log").unwrap();
+    let mut progress = cbfunc::open_progress_log("progress_v3.log").unwrap();
     writeln!(
         progress,
         "DEPTH={} | {} total iterations | searching for x + 1",

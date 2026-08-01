@@ -90,7 +90,7 @@ fn main() {
         total += 1u64 << l;
     }
 
-    let mut progress = std::fs::File::create("progress_eml_v1.log").unwrap();
+    let mut progress = cbfunc::open_progress_log("progress_eml_v1.log").unwrap();
     writeln!(
         progress,
         "DEPTH={} | TARGET={} | {} total iterations",

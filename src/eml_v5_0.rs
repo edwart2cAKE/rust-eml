@@ -421,7 +421,7 @@ fn main() {
     let max_compute_depth = if use_time_mode { MAX_DEPTH } else { depth_val };
     let total_iters: u64 = (1..=max_compute_depth).map(|l| depth_count(l, base)).sum();
     let num_threads = rayon::current_num_threads();
-    let progress = Arc::new(Mutex::new(std::fs::File::create("progress_v5.log").unwrap()));
+    let progress = Arc::new(Mutex::new(cbfunc::open_progress_log("progress_v5.log").unwrap()));
     {
         let mut pf = progress.lock().unwrap();
         let depth_desc = if use_time_mode { "∞".to_string() } else { depth_val.to_string() };
