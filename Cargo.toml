@@ -1,0 +1,36 @@
+[package]
+name = "cbfunc"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "cbfunc"
+path = "src/cbfunc.rs"
+
+[[bin]]
+name = "cbfunc2"
+path = "src/cbfunc_v2.rs"
+
+[[bin]]
+name = "cbfunc3"
+path = "src/cbfunc_v3.rs"
+
+[[bin]]
+name = "eml_v1"
+path = "src/eml_v1.rs"
+
+[[bin]]
+name = "eml_xy_from_exy1"
+path = "src/eml_xy_from_exy1.rs"
+
+[[bin]]
+name = "check_xy"
+path = "src/check_xy.rs"
+
+[[bin]]
+name = "eml_v5_0"
+path = "src/eml_v5_0.rs"
+
+[dependencies]
+rand = "0.8"
+rayon = "1"
