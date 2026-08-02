@@ -4,6 +4,7 @@ use rayon::prelude::*;
 use std::collections::HashMap;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use cbfunc::{NumExpr, is_valid, parse_num};
@@ -438,25 +439,41 @@ fn main() {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let iterated = Arc::new(AtomicU64::new(0));
 
+        let (tx, rx) = mpsc::channel::<()>();
         let reporter_handle = {
             let p = progress.clone();
             let sflag = stop_flag.clone();
             let mt = matched.clone();
             let it = iterated.clone();
-            std::thread::spawn(move || loop {
-                std::thread::sleep(Duration::from_secs(1));
-                if sflag.load(Ordering::Relaxed) {
-                    break;
+            std::thread::spawn(move || {
+                let mut last_report = Instant::now();
+                loop {
+                    match rx.recv_timeout(Duration::from_millis(100)) {
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        _ => {}
+                    }
+                    if sflag.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let elapsed = overall_start.elapsed().as_secs_f64();
+                    if elapsed >= time_val {
+                        sflag.store(true, Ordering::Relaxed);
+                        let done = it.load(Ordering::Relaxed);
+                        let rate = done as f64 / elapsed.max(0.001);
+                        let mut pf = p.lock().unwrap();
+                        writeln!(*pf, "  {:.0}s | {}/{} iter | {:.0} it/s | {} matches", elapsed, done, total_iters, rate, mt.load(Ordering::Relaxed)).unwrap();
+                        pf.flush().unwrap();
+                        break;
+                    }
+                    if last_report.elapsed() >= Duration::from_secs(1) {
+                        last_report = Instant::now();
+                        let done = it.load(Ordering::Relaxed);
+                        let rate = done as f64 / elapsed.max(0.001);
+                        let mut pf = p.lock().unwrap();
+                        writeln!(*pf, "  {:.0}s | {}/{} iter | {:.0} it/s | {} matches", elapsed, done, total_iters, rate, mt.load(Ordering::Relaxed)).unwrap();
+                        pf.flush().unwrap();
+                    }
                 }
-                let elapsed = overall_start.elapsed().as_secs_f64();
-                if elapsed >= time_val {
-                    sflag.store(true, Ordering::Relaxed);
-                }
-                let done = it.load(Ordering::Relaxed);
-                let rate = done as f64 / elapsed.max(0.001);
-                let mut pf = p.lock().unwrap();
-                writeln!(*pf, "  {:.0}s | {}/{} iter | {:.0} it/s | {} matches", elapsed, done, total_iters, rate, mt.load(Ordering::Relaxed)).unwrap();
-                pf.flush().unwrap();
             })
         };
 
@@ -517,6 +534,7 @@ fn main() {
         }
 
         stop_flag.store(true, Ordering::Relaxed);
+        drop(tx);
         reporter_handle.join().unwrap();
     } else {
         let mut total: u64 = 0;
@@ -532,12 +550,16 @@ fn main() {
 
         let iterated = Arc::new(AtomicU64::new(0));
 
+        let (tx, rx) = mpsc::channel::<()>();
         let reporter_handle = {
             let p = progress.clone();
             let it = iterated.clone();
             let mt = matched.clone();
             std::thread::spawn(move || loop {
-                std::thread::sleep(Duration::from_secs(1));
+                match rx.recv_timeout(Duration::from_secs(1)) {
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    _ => {}
+                }
                 let done = it.load(Ordering::Relaxed);
                 if done >= total {
                     break;
@@ -594,6 +616,7 @@ fn main() {
             });
         }
 
+        drop(tx);
         reporter_handle.join().unwrap();
         {
             let mut pf = progress.lock().unwrap();

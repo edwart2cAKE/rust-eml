@@ -1,5 +1,6 @@
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use cbfunc::{parse_target, search_length, total_valid, used_variables_in_target};
@@ -133,14 +134,19 @@ fn main() {
     let max_compute_depth = if use_time_mode { MAX_DEPTH } else { depth_val };
     let leaves: Vec<char> = alphabet[..alphabet.len() - 1].to_vec();
     let leaf_types = leaves.len() as u64;
-    let total_iters: u64 = total_valid(leaf_types, max_compute_depth);
+    let total_iters: Option<u64> = if use_time_mode {
+        None
+    } else {
+        Some(total_valid(leaf_types, max_compute_depth))
+    };
     let num_threads = rayon::current_num_threads();
     let progress = Arc::new(Mutex::new(cbfunc::open_progress_log("progress_v5_1.log").unwrap()));
     {
         let mut pf = progress.lock().unwrap();
         let depth_desc = if use_time_mode { "∞".to_string() } else { depth_val.to_string() };
         let time_desc = if use_time_mode { format!("{}s", time_val) } else { "none".to_string() };
-        writeln!(*pf, "target: {} | alphabet: [{}] | base: {} | tol: {:.0e} | depth: {} | time: {} | threads: {} | valid iter: {}", target_str, alphabet_desc, base, tolerance, depth_desc, time_desc, num_threads, total_iters).unwrap();
+        let valid_iter_desc = total_iters.map(|t| format!(" | valid iter: {}", t)).unwrap_or_default();
+        writeln!(*pf, "target: {} | alphabet: [{}] | base: {} | tol: {:.0e} | depth: {} | time: {} | threads: {}{}", target_str, alphabet_desc, base, tolerance, depth_desc, time_desc, num_threads, valid_iter_desc).unwrap();
         pf.flush().unwrap();
     }
 
@@ -152,27 +158,40 @@ fn main() {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let iterated = Arc::new(AtomicU64::new(0));
 
+        let (tx, rx) = mpsc::channel::<()>();
         let reporter_handle = {
             let p = progress.clone();
             let sflag = stop_flag.clone();
             let mt = matched.clone();
             let it = iterated.clone();
-            std::thread::spawn(move || loop {
-                std::thread::sleep(Duration::from_secs(1));
-                if sflag.load(Ordering::Relaxed) {
-                    break;
-                }
-                let elapsed = overall_start.elapsed().as_secs_f64();
-                if elapsed >= time_val {
-                    sflag.store(true, Ordering::Relaxed);
-                }
-                let done = it.load(Ordering::Relaxed);
-                let rate = done as f64 / elapsed.max(0.001);
-                let mut pf = p.lock().unwrap();
-                writeln!(*pf, "  {:.0}s | {}/{} iter | {:.0} it/s | {} matches", elapsed, done, total_iters, rate, mt.load(Ordering::Relaxed)).unwrap();
-                pf.flush().unwrap();
-                if sflag.load(Ordering::Relaxed) {
-                    break;
+            std::thread::spawn(move || {
+                let mut last_report = Instant::now();
+                loop {
+                    match rx.recv_timeout(Duration::from_millis(100)) {
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        _ => {}
+                    }
+                    if sflag.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let elapsed = overall_start.elapsed().as_secs_f64();
+                    if elapsed >= time_val {
+                        sflag.store(true, Ordering::Relaxed);
+                        let done = it.load(Ordering::Relaxed);
+                        let rate = done as f64 / elapsed.max(0.001);
+                        let mut pf = p.lock().unwrap();
+                        writeln!(*pf, "  {:.5}s | {} iter | {:.0} it/s | {} matches", elapsed, done, rate, mt.load(Ordering::Relaxed)).unwrap();
+                        pf.flush().unwrap();
+                        break;
+                    }
+                    if last_report.elapsed() >= Duration::from_secs(1) {
+                        last_report = Instant::now();
+                        let done = it.load(Ordering::Relaxed);
+                        let rate = done as f64 / elapsed.max(0.001);
+                        let mut pf = p.lock().unwrap();
+                        writeln!(*pf, "  {:.5}s | {} iter | {:.0} it/s | {} matches", elapsed, done, rate, mt.load(Ordering::Relaxed)).unwrap();
+                        pf.flush().unwrap();
+                    }
                 }
             })
         };
@@ -197,15 +216,16 @@ fn main() {
             );
             {
                 let mut pf = progress.lock().unwrap();
-                writeln!(*pf, "  depth {} done | elapsed {:.1}s | {} matches", length, overall_start.elapsed().as_secs_f64(), matched.load(Ordering::Relaxed)).unwrap();
+                writeln!(*pf, "  depth {} done | elapsed {:.5}s | {} matches", length, overall_start.elapsed().as_secs_f64(), matched.load(Ordering::Relaxed)).unwrap();
                 pf.flush().unwrap();
             }
         }
 
         stop_flag.store(true, Ordering::Relaxed);
+        drop(tx);
         reporter_handle.join().unwrap();
     } else {
-        let total = total_iters;
+        let total = total_iters.unwrap();
 
         {
             let mut pf = progress.lock().unwrap();
@@ -216,12 +236,16 @@ fn main() {
         let iterated = Arc::new(AtomicU64::new(0));
         let dummy_stop = AtomicBool::new(false);
 
+        let (tx, rx) = mpsc::channel::<()>();
         let reporter_handle = {
             let p = progress.clone();
             let it = iterated.clone();
             let mt = matched.clone();
             std::thread::spawn(move || loop {
-                std::thread::sleep(Duration::from_secs(1));
+                match rx.recv_timeout(Duration::from_secs(1)) {
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    _ => {}
+                }
                 let done = it.load(Ordering::Relaxed);
                 if done >= total {
                     break;
@@ -253,11 +277,12 @@ fn main() {
             );
             {
                 let mut pf = progress.lock().unwrap();
-                writeln!(*pf, "  depth {} done | elapsed {:.1}s | {} matches", length, overall_start.elapsed().as_secs_f64(), matched.load(Ordering::Relaxed)).unwrap();
+                writeln!(*pf, "  depth {} done | elapsed {:.5}s | {} matches", length, overall_start.elapsed().as_secs_f64(), matched.load(Ordering::Relaxed)).unwrap();
                 pf.flush().unwrap();
             }
         }
 
+        drop(tx);
         reporter_handle.join().unwrap();
         {
             let mut pf = progress.lock().unwrap();
@@ -271,10 +296,10 @@ fn main() {
 
     {
         let mut pf = progress.lock().unwrap();
-        writeln!(*pf, "Done in {:.1?} | {} matches found", elapsed, final_matched).unwrap();
+        writeln!(*pf, "Done in {:.5}s | {} matches found", elapsed.as_secs_f64(), final_matched).unwrap();
         pf.flush().unwrap();
     }
-    println!("Done in {:.1?} | {} matches found", elapsed, final_matched);
+    println!("Done in {:.5}s | {} matches found", elapsed.as_secs_f64(), final_matched);
 
     let matches = matches_store.lock().unwrap();
     if !matches.is_empty() {
