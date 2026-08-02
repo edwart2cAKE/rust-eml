@@ -1,5 +1,5 @@
 use std::collections::{BTreeSet, HashMap};
-use cbfunc::{build_frontier, catalan, gen_complete, is_valid, total_valid, valid_count};
+use cbfunc::{build_frontier, catalan, eval_quaternary, gen_complete, is_valid, parse_num, total_valid, valid_count};
 
 fn alphabet_chars(base: u64) -> Vec<char> {
     let base_chars = ['0', '1', '3'];
@@ -31,6 +31,10 @@ fn brute_valid(base: u64, length: u32) -> Vec<String> {
     out
 }
 
+fn gen_bytes(s: &[u8]) -> String {
+    s.iter().map(|&b| b as char).collect()
+}
+
 fn generated(base: u64, length: u32) -> BTreeSet<String> {
     let chars = alphabet_chars(base);
     let leaves: Vec<char> = chars[..chars.len() - 1].to_vec();
@@ -39,7 +43,7 @@ fn generated(base: u64, length: u32) -> BTreeSet<String> {
     for (prefix, slots, budget) in frontier {
         let mut s = prefix;
         gen_complete(&mut s, slots, budget, &leaves, &mut |fs| {
-            out.insert(fs.to_string());
+            out.insert(gen_bytes(fs));
             true
         });
     }
@@ -87,7 +91,7 @@ fn gen_complete_matches_frontier() {
         for (prefix, slots, budget) in frontier {
             let mut s = prefix;
             gen_complete(&mut s, slots, budget, &leaves, &mut |fs| {
-                whole.insert(fs.to_string());
+                whole.insert(gen_bytes(fs));
                 true
             });
         }
@@ -119,4 +123,69 @@ fn no_duplicate_emission() {
             );
         }
     }
+}
+
+#[test]
+fn eval_quaternary_matches_parse_num() {
+    let chars = alphabet_chars(4);
+    let leaves: Vec<char> = chars[..chars.len() - 1].to_vec();
+    let points = [(0.1, 0.1), (0.1, 10.0), (10.0, 0.1), (10.0, 10.0), (1.0, 1.0), (3.7, 2.2)];
+    for length in (1u32..=13).step_by(2) {
+        let frontier = build_frontier(length, &leaves, usize::MAX);
+        for (prefix, slots, budget) in frontier {
+            let mut s = prefix;
+            gen_complete(&mut s, slots, budget, &leaves, &mut |fs| {
+                let parsed = parse_num(std::str::from_utf8(fs).expect("generated string must be utf8"))
+                    .expect("generated string must parse");
+                for &(x, y) in &points {
+                    let direct = eval_quaternary(fs, x, y).expect("generated string must eval");
+                    let tree = parsed.eval(x, y);
+                    assert!(
+                        (direct.is_nan() && tree.is_nan()) || direct == tree,
+                        "mismatch for {} at ({}, {}): direct={} tree={}",
+                        gen_bytes(fs),
+                        x,
+                        y,
+                        direct,
+                        tree
+                    );
+                }
+                true
+            });
+        }
+    }
+}
+
+#[test]
+fn eval_quaternary_known_matches() {
+    for s in ["22322232232303133", "22322232232313033"] {
+        let parsed = parse_num(s).expect("known match must parse");
+        for (x, y) in [(0.5, 0.5), (2.0, 3.0), (10.0, 0.1)] {
+            let direct = eval_quaternary(s.as_bytes(), x, y).expect("known match must eval");
+            let tree = parsed.eval(x, y);
+            assert!(
+                (direct.is_nan() && tree.is_nan()) || direct == tree,
+                "mismatch for {} at ({}, {}): direct={} tree={}",
+                s,
+                x,
+                y,
+                direct,
+                tree
+            );
+        }
+    }
+}
+
+#[test]
+fn eval_quaternary_rejects_invalid() {
+    for bad in ["23", "223", "02", "222", "3333", "20", "2x3", ""] {
+        assert!(
+            eval_quaternary(bad.as_bytes(), 1.0, 2.0).is_none(),
+            "{:?} should evaluate to None",
+            bad
+        );
+    }
+    assert_eq!(eval_quaternary(b"0", 1.0, 2.0), Some(1.0));
+    assert_eq!(eval_quaternary(b"1", 1.0, 2.0), Some(2.0));
+    assert_eq!(eval_quaternary(b"3", 1.0, 2.0), Some(1.0));
 }

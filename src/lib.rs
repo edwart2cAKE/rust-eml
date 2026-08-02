@@ -77,11 +77,48 @@ impl NumExpr {
     }
 }
 
-pub fn f_num(a: &NumExpr, b: &NumExpr) -> NumExpr {
+pub fn f_num(a: NumExpr, b: NumExpr) -> NumExpr {
     NumExpr::Sub(
-        Box::new(NumExpr::Exp(Box::new(a.clone()))),
-        Box::new(NumExpr::Log(Box::new(b.clone()))),
+        Box::new(NumExpr::Exp(Box::new(a))),
+        Box::new(NumExpr::Log(Box::new(b))),
     )
+}
+
+pub fn eval_quaternary(fs: &[u8], x: f64, y: f64) -> Option<f64> {
+    let mut stack: [std::mem::MaybeUninit<f64>; 64] = unsafe {
+        std::mem::MaybeUninit::uninit().assume_init()
+    };
+    let mut sp = 0usize;
+    for &c in fs.iter().rev() {
+        match c {
+            b'0' | b'1' | b'3' => {
+                if sp >= stack.len() {
+                    return None;
+                }
+                stack[sp] = std::mem::MaybeUninit::new(match c {
+                    b'0' => x,
+                    b'1' => y,
+                    _ => 1.0,
+                });
+                sp += 1;
+            }
+            b'2' => {
+                if sp < 2 {
+                    return None;
+                }
+                let a = unsafe { stack[sp - 1].assume_init() };
+                let b = unsafe { stack[sp - 2].assume_init() };
+                sp -= 1;
+                stack[sp - 1] = std::mem::MaybeUninit::new(a.exp() - b.ln());
+            }
+            _ => return None,
+        }
+    }
+    if sp == 1 {
+        Some(unsafe { stack[0].assume_init() })
+    } else {
+        None
+    }
 }
 
 pub fn is_valid(fs: &str, cache: &mut HashMap<String, bool>) -> bool {
@@ -113,7 +150,7 @@ pub fn parse_num(fs: &str) -> Option<NumExpr> {
         let (part1, part2) = split_pair(&fs[1..])?;
         let p1 = parse_num(part1)?;
         let p2 = parse_num(part2)?;
-        Some(f_num(&p1, &p2))
+        Some(f_num(p1, p2))
     } else {
         None
     }
@@ -421,6 +458,17 @@ pub fn fuzzy_equal(parsed: &NumExpr, target: &TargetExpr, rng: &mut impl Rng, to
     true
 }
 
+pub fn fuzzy_equal_str(fs: &[u8], target: &TargetExpr, points: &[(f64, f64)], tolerance: f64) -> bool {
+    for &(x_val, y_val) in points {
+        let Some(p_val) = eval_quaternary(fs, x_val, y_val) else { return false; };
+        let t_val = target.eval(x_val, y_val);
+        if p_val.is_nan() || t_val.is_nan() || (p_val - t_val).abs() > tolerance {
+            return false;
+        }
+    }
+    true
+}
+
 pub fn catalan(k: u64) -> u64 {
     let mut c: u128 = 1;
     for i in 1..=k {
@@ -448,11 +496,11 @@ pub fn gen_complete(
     slots: u64,
     budget: u64,
     leaves: &[char],
-    emit: &mut impl FnMut(&str) -> bool,
+    emit: &mut impl FnMut(&[u8]) -> bool,
 ) -> bool {
     if slots == 0 {
         if budget == 0 {
-            return emit(std::str::from_utf8(s).unwrap());
+            return emit(s);
         }
         return true;
     }
@@ -549,13 +597,14 @@ pub fn search_length(
             return Err(());
         }
         let mut rng = StdRng::from_entropy();
+        let points: [(f64, f64); NUM_EVAL_POINTS] = std::array::from_fn(|_| {
+            (rng.gen_range(0.1..=10.0), rng.gen_range(0.1..=10.0))
+        });
         let mut s = prefix.clone();
         gen_complete(&mut s, *slots, *budget, &leaves_ref, &mut |fs| {
-            if let Some(parsed) = parse_num(fs) {
-                if fuzzy_equal(&parsed, target, &mut rng, tol) {
-                    mmatched.fetch_add(1, Ordering::Relaxed);
-                    mstore.lock().unwrap().push((fs.to_string(), length));
-                }
+            if fuzzy_equal_str(fs, target, &points, tol) {
+                mmatched.fetch_add(1, Ordering::Relaxed);
+                mstore.lock().unwrap().push((String::from_utf8_lossy(fs).into_owned(), length));
             }
             mit.fetch_add(1, Ordering::Relaxed);
             !sflag.load(Ordering::Relaxed)
