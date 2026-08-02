@@ -1,3 +1,4 @@
+#![deprecated(note = "legacy quaternary search (hardcoded target + DEPTH); superseded by eml_v5_1")]
 use std::collections::HashMap;
 use std::io::Write;
 use std::time::Instant;

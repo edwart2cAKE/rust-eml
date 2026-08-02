@@ -1,3 +1,4 @@
+#![deprecated(note = "one-off exy1->x*y helper (hardcoded target + DEPTH); superseded by eml_v5_1")]
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use rayon::prelude::*;

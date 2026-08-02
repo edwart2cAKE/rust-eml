@@ -1,4 +1,5 @@
 use std::collections::{BTreeSet, HashMap};
+use std::process::Command;
 use cbfunc::{build_frontier, catalan, eval_quaternary, gen_complete, is_valid, parse_num, total_valid, valid_count};
 
 fn alphabet_chars(base: u64) -> Vec<char> {
@@ -188,4 +189,21 @@ fn eval_quaternary_rejects_invalid() {
     assert_eq!(eval_quaternary(b"0", 1.0, 2.0), Some(1.0));
     assert_eq!(eval_quaternary(b"1", 1.0, 2.0), Some(2.0));
     assert_eq!(eval_quaternary(b"3", 1.0, 2.0), Some(1.0));
+}
+
+#[test]
+fn eml_v5_1_bin_finds_and_verifies() {
+    let bin = env!("CARGO_BIN_EXE_eml_v5_1");
+    let out = Command::new(bin)
+        .args(["--target", "exp(x)", "--depth", "3"])
+        .output()
+        .expect("failed to run eml_v5_1");
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("203 (depth 3)"), "stdout: {}", stdout);
+    assert!(
+        stdout.contains("[VERIFIED]") || stdout.contains("could not run uv/sympy verifier"),
+        "stdout: {}",
+        stdout
+    );
 }

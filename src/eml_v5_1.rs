@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::io::Write;
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -39,7 +41,82 @@ fn print_help() {
     eprintln!("  --time <SECS>    Max search time in seconds. Mutually exclusive with --depth.");
     eprintln!("  --tol <FLOAT>    Numeric tolerance (default: 1e-5).");
     eprintln!("  --threads <N>    Number of threads (default: all available).");
+    eprintln!("  --no-verify       Skip symbolic verification of matches (default: verify via sympy).");
     eprintln!("  --help           Show this help message.");
+}
+
+fn verify_matches(
+    matches: &[(String, u32)],
+    target: &str,
+) -> Option<HashMap<String, (String, String)>> {
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let script = std::path::Path::new(manifest).join("scripts").join("verify_eml.py");
+    if !script.exists() {
+        eprintln!("warning: verifier script not found at {}", script.display());
+        return None;
+    }
+    let tmp = std::env::temp_dir().join(format!("eml_matches_{}.txt", std::process::id()));
+    {
+        let f = match std::fs::File::create(&tmp) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("warning: could not create match file: {}", e);
+                return None;
+            }
+        };
+        let mut w = std::io::BufWriter::new(f);
+        for (s, _) in matches {
+            if writeln!(w, "{}", s).is_err() {
+                let _ = std::fs::remove_file(&tmp);
+                return None;
+            }
+        }
+    }
+    let output = Command::new("uv")
+        .args([
+            "run",
+            "--with",
+            "sympy",
+            "--with",
+            "mpmath",
+            "python3",
+            script.to_str().unwrap_or(""),
+            "--target",
+            target,
+            "--strings-file",
+            tmp.to_str().unwrap_or(""),
+        ])
+        .output();
+    let _ = std::fs::remove_file(&tmp);
+    let output = match output {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("warning: could not run uv/sympy verifier ({}); reporting matches unverified", e);
+            return None;
+        }
+    };
+    if !output.status.success() {
+        eprintln!(
+            "warning: verifier failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut results = HashMap::new();
+    for line in stdout.lines() {
+        let mut parts = line.split('\t');
+        if let (Some(v), Some(qs)) = (parts.next(), parts.next()) {
+            let detail: String = parts.collect::<Vec<_>>().join("\t");
+            results.insert(qs.to_string(), (v.to_string(), detail));
+        }
+    }
+    if results.is_empty() {
+        eprintln!("warning: verifier produced no verdicts; reporting matches unverified");
+        return None;
+    }
+    Some(results)
 }
 
 fn main() {
@@ -55,6 +132,7 @@ fn main() {
     let mut max_time: Option<f64> = None;
     let mut threads: Option<usize> = None;
     let mut tolerance: f64 = DEFAULT_TOLERANCE;
+    let mut verify: bool = true;
 
     let mut i = 1;
     while i < args.len() {
@@ -83,6 +161,9 @@ fn main() {
                 i += 1;
                 if i >= args.len() { eprintln!("error: --threads requires a value"); std::process::exit(1); }
                 threads = Some(args[i].parse().unwrap_or_else(|_| { eprintln!("error: invalid thread count '{}'", args[i]); std::process::exit(1); }));
+            }
+            "--no-verify" => {
+                verify = false;
             }
             _ => {
                 eprintln!("error: unknown flag '{}'", args[i]);
@@ -318,8 +399,30 @@ fn main() {
     let matches = matches_store.lock().unwrap();
     if !matches.is_empty() {
         println!("Matches:");
-        for (s, depth) in matches.iter() {
-            println!("  {} (depth {})", s, depth);
+        let verifications = if verify { verify_matches(&matches, &target_str) } else { None };
+        if let Some(verifications) = &verifications {
+            let mut n_verified = 0;
+            let mut n_likely = 0;
+            let mut n_other = 0;
+            for (s, depth) in matches.iter() {
+                let (v, detail) = verifications
+                    .get(s)
+                    .cloned()
+                    .unwrap_or_else(|| ("UNKNOWN".to_string(), "no verdict".to_string()));
+                println!("  {} (depth {}) [{}] {}", s, depth, v, detail);
+                match v.as_str() {
+                    "VERIFIED" => n_verified += 1,
+                    "LIKELY" => n_likely += 1,
+                    _ => n_other += 1,
+                }
+            }
+            let mut pf = progress.lock().unwrap();
+            writeln!(*pf, "  verification: {} VERIFIED, {} LIKELY, {} DIFFERENT/UNKNOWN", n_verified, n_likely, n_other).unwrap();
+            pf.flush().unwrap();
+        } else {
+            for (s, depth) in matches.iter() {
+                println!("  {} (depth {})", s, depth);
+            }
         }
     }
 }

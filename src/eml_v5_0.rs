@@ -1,3 +1,4 @@
+#![deprecated(note = "index-based enumeration is orders of magnitude slower; use eml_v5_1")]
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use rayon::prelude::*;
