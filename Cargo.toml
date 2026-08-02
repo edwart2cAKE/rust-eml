@@ -31,6 +31,10 @@ path = "src/check_xy.rs"
 name = "eml_v5_0"
 path = "src/eml_v5_0.rs"
 
+[[bin]]
+name = "eml_v5_1"
+path = "src/eml_v5_1.rs"
+
 [dependencies]
 rand = "0.8"
 rayon = "1"
