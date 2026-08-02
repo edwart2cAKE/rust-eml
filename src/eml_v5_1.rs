@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 use cbfunc::{parse_target, search_length, total_valid, used_variables_in_target};
 
 const DEFAULT_TOLERANCE: f64 = 1e-5;
-const MAX_DEPTH: u32 = 20;
 const DEFAULT_DEPTH: u32 = 12;
+const WARN_ITERATIONS: u64 = 1_000_000_000;
 
 fn describe_alphabet(alphabet: &[char]) -> String {
     alphabet.iter().map(|c| {
@@ -131,7 +131,7 @@ fn main() {
         rayon::ThreadPoolBuilder::new().num_threads(n).build_global().unwrap_or_else(|e| { eprintln!("warning: thread pool already initialized: {}", e); });
     }
 
-    let max_compute_depth = if use_time_mode { MAX_DEPTH } else { depth_val };
+    let max_compute_depth = depth_val;
     let leaves: Vec<char> = alphabet[..alphabet.len() - 1].to_vec();
     let leaf_types = leaves.len() as u64;
     let total_iters: Option<u64> = if use_time_mode {
@@ -166,6 +166,7 @@ fn main() {
             let it = iterated.clone();
             std::thread::spawn(move || {
                 let mut last_report = Instant::now();
+                let mut warned = false;
                 loop {
                     match rx.recv_timeout(Duration::from_millis(100)) {
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -174,10 +175,17 @@ fn main() {
                     if sflag.load(Ordering::Relaxed) {
                         break;
                     }
+                    let done = it.load(Ordering::Relaxed);
+                    if !warned && done > WARN_ITERATIONS {
+                        warned = true;
+                        eprintln!("warning: {} iterations done, exceeding 1 billion", done);
+                        let mut pf = p.lock().unwrap();
+                        writeln!(*pf, "  WARNING: {} iterations done, exceeding 1 billion", done).unwrap();
+                        pf.flush().unwrap();
+                    }
                     let elapsed = overall_start.elapsed().as_secs_f64();
                     if elapsed >= time_val {
                         sflag.store(true, Ordering::Relaxed);
-                        let done = it.load(Ordering::Relaxed);
                         let rate = done as f64 / elapsed.max(0.001);
                         let mut pf = p.lock().unwrap();
                         writeln!(*pf, "  {:.5}s | {} iter | {:.0} it/s | {} matches", elapsed, done, rate, mt.load(Ordering::Relaxed)).unwrap();
@@ -186,7 +194,6 @@ fn main() {
                     }
                     if last_report.elapsed() >= Duration::from_secs(1) {
                         last_report = Instant::now();
-                        let done = it.load(Ordering::Relaxed);
                         let rate = done as f64 / elapsed.max(0.001);
                         let mut pf = p.lock().unwrap();
                         writeln!(*pf, "  {:.5}s | {} iter | {:.0} it/s | {} matches", elapsed, done, rate, mt.load(Ordering::Relaxed)).unwrap();
@@ -196,12 +203,9 @@ fn main() {
             })
         };
 
-        for length in 1u32..=max_compute_depth {
+        for length in (1u32..).step_by(2) {
             if stop_flag.load(Ordering::Relaxed) {
                 break;
-            }
-            if length % 2 == 0 {
-                continue;
             }
             search_length(
                 length,
@@ -241,22 +245,32 @@ fn main() {
             let p = progress.clone();
             let it = iterated.clone();
             let mt = matched.clone();
-            std::thread::spawn(move || loop {
-                match rx.recv_timeout(Duration::from_secs(1)) {
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                    _ => {}
+            std::thread::spawn(move || {
+                let mut warned = false;
+                loop {
+                    match rx.recv_timeout(Duration::from_secs(1)) {
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        _ => {}
+                    }
+                    let done = it.load(Ordering::Relaxed);
+                    if done >= total {
+                        break;
+                    }
+                    if !warned && done > WARN_ITERATIONS {
+                        warned = true;
+                        eprintln!("warning: {} iterations done, exceeding 1 billion", done);
+                        let mut pf = p.lock().unwrap();
+                        writeln!(*pf, "  WARNING: {} iterations done, exceeding 1 billion", done).unwrap();
+                        pf.flush().unwrap();
+                    }
+                    let elapsed = overall_start.elapsed().as_secs_f64();
+                    let rate = done as f64 / elapsed;
+                    let pct = done as f64 / total as f64 * 100.0;
+                    let remaining = (total - done) as f64 / rate;
+                    let mut pf = p.lock().unwrap();
+                    writeln!(*pf, "  {}/{} ({:.1}%) | {:.0} it/s | ~{:.0}s remaining | {} matches", done, total, pct, rate, remaining, mt.load(Ordering::Relaxed)).unwrap();
+                    pf.flush().unwrap();
                 }
-                let done = it.load(Ordering::Relaxed);
-                if done >= total {
-                    break;
-                }
-                let elapsed = overall_start.elapsed().as_secs_f64();
-                let rate = done as f64 / elapsed;
-                let pct = done as f64 / total as f64 * 100.0;
-                let remaining = (total - done) as f64 / rate;
-                let mut pf = p.lock().unwrap();
-                writeln!(*pf, "  {}/{} ({:.1}%) | {:.0} it/s | ~{:.0}s remaining | {} matches", done, total, pct, rate, remaining, mt.load(Ordering::Relaxed)).unwrap();
-                pf.flush().unwrap();
             })
         };
 

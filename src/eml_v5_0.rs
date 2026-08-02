@@ -11,8 +11,8 @@ use cbfunc::{NumExpr, is_valid, parse_num};
 
 const DEFAULT_TOLERANCE: f64 = 1e-5;
 const NUM_EVAL_POINTS: usize = 10;
-const MAX_DEPTH: u32 = 20;
 const DEFAULT_DEPTH: u32 = 12;
+const WARN_ITERATIONS: u64 = 1_000_000_000;
 
 #[derive(Clone)]
 enum TargetExpr {
@@ -419,15 +419,20 @@ fn main() {
         rayon::ThreadPoolBuilder::new().num_threads(n).build_global().unwrap_or_else(|e| { eprintln!("warning: thread pool already initialized: {}", e); });
     }
 
-    let max_compute_depth = if use_time_mode { MAX_DEPTH } else { depth_val };
-    let total_iters: u64 = (1..=max_compute_depth).map(|l| depth_count(l, base)).sum();
+    let max_compute_depth = depth_val;
+    let total_iters: Option<u64> = if use_time_mode {
+        None
+    } else {
+        Some((1..=max_compute_depth).map(|l| depth_count(l, base)).sum())
+    };
     let num_threads = rayon::current_num_threads();
     let progress = Arc::new(Mutex::new(cbfunc::open_progress_log("progress_v5.log").unwrap()));
     {
         let mut pf = progress.lock().unwrap();
         let depth_desc = if use_time_mode { "∞".to_string() } else { depth_val.to_string() };
         let time_desc = if use_time_mode { format!("{}s", time_val) } else { "none".to_string() };
-        writeln!(*pf, "target: {} | alphabet: [{}] | base: {} | tol: {:.0e} | depth: {} | time: {} | threads: {} | iter: {}", target_str, alphabet_desc, base, tolerance, depth_desc, time_desc, num_threads, total_iters).unwrap();
+        let iter_desc = total_iters.map(|t| format!(" | iter: {}", t)).unwrap_or_default();
+        writeln!(*pf, "target: {} | alphabet: [{}] | base: {} | tol: {:.0e} | depth: {} | time: {} | threads: {}{}", target_str, alphabet_desc, base, tolerance, depth_desc, time_desc, num_threads, iter_desc).unwrap();
         pf.flush().unwrap();
     }
 
@@ -447,6 +452,7 @@ fn main() {
             let it = iterated.clone();
             std::thread::spawn(move || {
                 let mut last_report = Instant::now();
+                let mut warned = false;
                 loop {
                     match rx.recv_timeout(Duration::from_millis(100)) {
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -455,34 +461,55 @@ fn main() {
                     if sflag.load(Ordering::Relaxed) {
                         break;
                     }
+                    let done = it.load(Ordering::Relaxed);
+                    if !warned && done > WARN_ITERATIONS {
+                        warned = true;
+                        eprintln!("warning: {} iterations done, exceeding 1 billion", done);
+                        let mut pf = p.lock().unwrap();
+                        writeln!(*pf, "  WARNING: {} iterations done, exceeding 1 billion", done).unwrap();
+                        pf.flush().unwrap();
+                    }
                     let elapsed = overall_start.elapsed().as_secs_f64();
                     if elapsed >= time_val {
                         sflag.store(true, Ordering::Relaxed);
-                        let done = it.load(Ordering::Relaxed);
                         let rate = done as f64 / elapsed.max(0.001);
                         let mut pf = p.lock().unwrap();
-                        writeln!(*pf, "  {:.0}s | {}/{} iter | {:.0} it/s | {} matches", elapsed, done, total_iters, rate, mt.load(Ordering::Relaxed)).unwrap();
+                        writeln!(*pf, "  {:.0}s | {} iter | {:.0} it/s | {} matches", elapsed, done, rate, mt.load(Ordering::Relaxed)).unwrap();
                         pf.flush().unwrap();
                         break;
                     }
                     if last_report.elapsed() >= Duration::from_secs(1) {
                         last_report = Instant::now();
-                        let done = it.load(Ordering::Relaxed);
                         let rate = done as f64 / elapsed.max(0.001);
                         let mut pf = p.lock().unwrap();
-                        writeln!(*pf, "  {:.0}s | {}/{} iter | {:.0} it/s | {} matches", elapsed, done, total_iters, rate, mt.load(Ordering::Relaxed)).unwrap();
+                        writeln!(*pf, "  {:.0}s | {} iter | {:.0} it/s | {} matches", elapsed, done, rate, mt.load(Ordering::Relaxed)).unwrap();
                         pf.flush().unwrap();
                     }
                 }
             })
         };
 
-        for length in 1u32..=max_compute_depth {
+        let mut length: u32 = 1;
+        loop {
             if stop_flag.load(Ordering::Relaxed) {
                 break;
             }
-            let first = depth_first_index(length, base);
-            let count = depth_count(length, base);
+            let pow = match base.checked_pow(length) {
+                Some(p) => p,
+                None => {
+                    eprintln!("warning: base^{} overflows u64 at depth {}; stopping search", length, length);
+                    let mut pf = progress.lock().unwrap();
+                    writeln!(*pf, "  WARNING: base^{} overflows u64 at depth {}; stopping search", length, length).unwrap();
+                    pf.flush().unwrap();
+                    break;
+                }
+            };
+            let (first, count) = if length == 1 {
+                (0u64, pow)
+            } else {
+                let first = base.pow(length - 1);
+                (first, pow - first)
+            };
             let num_chunks = (num_threads as u64 * 4).max(1);
             let chunk_size = count / num_chunks;
             let ranges: Vec<(u64, u64)> = (0..num_chunks)
@@ -531,6 +558,7 @@ fn main() {
                 writeln!(*pf, "  depth {} done | elapsed {:.1}s | {} matches", length, overall_start.elapsed().as_secs_f64(), matched.load(Ordering::Relaxed)).unwrap();
                 pf.flush().unwrap();
             }
+            length += 1;
         }
 
         stop_flag.store(true, Ordering::Relaxed);
@@ -555,22 +583,32 @@ fn main() {
             let p = progress.clone();
             let it = iterated.clone();
             let mt = matched.clone();
-            std::thread::spawn(move || loop {
-                match rx.recv_timeout(Duration::from_secs(1)) {
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                    _ => {}
+            std::thread::spawn(move || {
+                let mut warned = false;
+                loop {
+                    match rx.recv_timeout(Duration::from_secs(1)) {
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        _ => {}
+                    }
+                    let done = it.load(Ordering::Relaxed);
+                    if done >= total {
+                        break;
+                    }
+                    if !warned && done > WARN_ITERATIONS {
+                        warned = true;
+                        eprintln!("warning: {} iterations done, exceeding 1 billion", done);
+                        let mut pf = p.lock().unwrap();
+                        writeln!(*pf, "  WARNING: {} iterations done, exceeding 1 billion", done).unwrap();
+                        pf.flush().unwrap();
+                    }
+                    let elapsed = overall_start.elapsed().as_secs_f64();
+                    let rate = done as f64 / elapsed;
+                    let pct = done as f64 / total as f64 * 100.0;
+                    let remaining = (total - done) as f64 / rate;
+                    let mut pf = p.lock().unwrap();
+                    writeln!(*pf, "  {}/{} ({:.1}%) | {:.0} it/s | ~{:.0}s remaining | {} matches", done, total, pct, rate, remaining, mt.load(Ordering::Relaxed)).unwrap();
+                    pf.flush().unwrap();
                 }
-                let done = it.load(Ordering::Relaxed);
-                if done >= total {
-                    break;
-                }
-                let elapsed = overall_start.elapsed().as_secs_f64();
-                let rate = done as f64 / elapsed;
-                let pct = done as f64 / total as f64 * 100.0;
-                let remaining = (total - done) as f64 / rate;
-                let mut pf = p.lock().unwrap();
-                writeln!(*pf, "  {}/{} ({:.1}%) | {:.0} it/s | ~{:.0}s remaining | {} matches", done, total, pct, rate, remaining, mt.load(Ordering::Relaxed)).unwrap();
-                pf.flush().unwrap();
             })
         };
 
