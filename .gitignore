@@ -3,3 +3,6 @@ target/
 *.lock
 *.log
 *.data*
+__pycache__/
+*.svg
+!showcase/*.svg

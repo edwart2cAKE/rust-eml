@@ -115,28 +115,61 @@ def node_width(lines):
     return max(w, 90.0 if lines[0] == "2" else 52.0)
 
 
+def box_width(node):
+    return node_width(label_lines(node))
+
+
 def compute_layout(root):
-    """In-order ranks become x, tree depth becomes y. Returns (nodes, max_depth, max_w)."""
+    """Tidy layered layout: depth becomes y, x positions are packed so boxes on
+    the same level never overlap (width ~ widest level, not node count).
+    Returns (nodes, max_depth, x_min, x_max) where x_min/x_max are the leftmost
+    and rightmost box edges in the untranslated frame."""
     nodes = []
-    max_depth = 0
+    max_depth = [0]
 
-    def walk(node, depth):
-        nonlocal max_depth
-        if node.left:
-            walk(node.left, depth + 1)
-        node.y = depth
+    def pack(node, depth):
+        if depth > max_depth[0]:
+            max_depth[0] = depth
+        w = box_width(node)
+        if node.left is None:
+            node.x = w / 2
+            node.y = float(depth)
+            nodes.append(node)
+            return {"nodes": [node], "root_x": w / 2, "left": {depth: 0.0}, "right": {depth: w}}
+        left = pack(node.left, depth + 1)
+        right = pack(node.right, depth + 1)
+        shift = 0.0
+        for d in left["right"]:
+            if d in right["left"]:
+                shift = max(shift, left["right"][d] + GAP - right["left"][d])
+        if shift > 0:
+            for n in right["nodes"]:
+                n.x += shift
+            right["root_x"] += shift
+            right["left"] = {d: v + shift for d, v in right["left"].items()}
+            right["right"] = {d: v + shift for d, v in right["right"].items()}
+        node.x = (left["root_x"] + right["root_x"]) / 2
+        node.y = float(depth)
         nodes.append(node)
-        if node.right:
-            walk(node.right, depth + 1)
-        if depth > max_depth:
-            max_depth = depth
+        sub = left["nodes"] + right["nodes"] + [node]
+        lc = dict(left["left"])
+        rc = dict(left["right"])
+        for d, v in right["left"].items():
+            lc[d] = min(lc.get(d, v), v)
+        for d, v in right["right"].items():
+            rc[d] = max(rc.get(d, v), v)
+        lc[depth] = min(lc.get(depth, node.x - w / 2), node.x - w / 2)
+        rc[depth] = max(rc.get(depth, node.x + w / 2), node.x + w / 2)
+        min_edge = min(lc.values())
+        if min_edge < 0:
+            for n in sub:
+                n.x -= min_edge
+            lc = {d: v - min_edge for d, v in lc.items()}
+            rc = {d: v - min_edge for d, v in rc.items()}
+        return {"nodes": sub, "root_x": node.x, "left": lc, "right": rc}
 
-    walk(root, 0)
-    max_w = max(node_width(label_lines(n)) for n in nodes)
-    x_spacing = max_w + GAP
-    for rank, node in enumerate(nodes):
-        node.x = x_spacing * rank
-    return nodes, max_depth, max_w
+    res = pack(root, 0)
+    return nodes, max_depth[0], min(res["left"].values()), max(res["right"].values())
 
 
 # ----------------------------------------------------------------------- svg
@@ -174,12 +207,12 @@ def edge_path(px, py, cx, cy):
 
 def render_svg(qs, caption=False):
     root = parse_tree(qs)
-    nodes, max_depth, max_w = compute_layout(root)
+    nodes, max_depth, x_min, x_max = compute_layout(root)
 
     caption_h = 44.0 if caption else 0.0
     total_h = MARGIN + max_depth * Y_SPACING + NODE_H / 2 + MARGIN + caption_h
-    x_off = MARGIN + max_w / 2
-    total_w = x_off + max(n.x for n in nodes) + max_w / 2 + MARGIN
+    total_w = MARGIN + (x_max - x_min) + MARGIN
+    x_off = MARGIN - x_min
 
     for node in nodes:
         node.x += x_off
@@ -287,6 +320,30 @@ def selftest():
             good = False
         ok = ok and good
         print(f"{'PASS' if good else 'FAIL'}  svg {qs} well-formed ({len(svg)} bytes)")
+
+    for qs in ["203", "22322232232303133", "22322232232313033", "22322303213"]:
+        root = parse_tree(qs)
+        nodes, max_depth, x_min, x_max = compute_layout(root)
+        levels = {}
+        for n in nodes:
+            levels.setdefault(int(n.y), []).append(n)
+        no_overlap = True
+        for depth in sorted(levels):
+            row = sorted(levels[depth], key=lambda n: n.x)
+            prev = None
+            for n in row:
+                w = box_width(n)
+                if prev is not None and prev[1] > n.x - w / 2 + 1e-6:
+                    no_overlap = False
+                prev = (n, n.x + w / 2)
+        parent_ok = True
+        for n in nodes:
+            if n.ch == "2":
+                if not (n.left.x <= n.x + 1e-6 <= n.right.x):
+                    parent_ok = False
+        good = no_overlap and parent_ok and x_max > x_min
+        ok = ok and good
+        print(f"{'PASS' if good else 'FAIL'}  layout {qs}: width={x_max - x_min:.0f}px, overlap={not no_overlap}, parent_centered={parent_ok}")
 
     return 0 if ok else 1
 
