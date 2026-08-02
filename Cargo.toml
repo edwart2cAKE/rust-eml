@@ -38,3 +38,6 @@ path = "src/eml_v5_1.rs"
 [dependencies]
 rand = "0.8"
 rayon = "1"
+
+[profile.release]
+debug = true
